@@ -1,8 +1,8 @@
 # futex-queue
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](https://github.com/chemicstry/futex-queue)
-[![Cargo](https://img.shields.io/crates/v/futex-queue.svg)](https://github.com/chemicstry/futex-queue)
-[![Documentation](https://docs.rs/futex-queue/badge.svg)](https://github.com/chemicstry/futex-queue)
+[![Cargo](https://img.shields.io/crates/v/futex-queue.svg)](https://crates.io/crates/futex-queue)
+[![Documentation](https://docs.rs/futex-queue/badge.svg)](https://docs.rs/futex-queue)
 
 An efficient MPSC queue with timer capability based on Linux futex. Suitable for real-time applications.
 

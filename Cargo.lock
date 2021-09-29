@@ -55,7 +55,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "futex_queue"
+name = "futex-queue"
 version = "0.1.0"
 dependencies = [
  "heapless",

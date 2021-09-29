@@ -11,10 +11,13 @@ const FUTEX_PARKED: i32 = -1;
 const FUTEX_EMPTY: i32 = 0;
 const FUTEX_NOTIFIED: i32 = 1;
 
+/// A fixed size MPSC queue with timer capability based on Linux futex. Suitable for real-time applications.
+/// Size N must be a power of 2.
 pub struct FutexQueue<T, const N: usize> {
     // Ideally this would be lock-free priority queue, but it's a complicated beast
     // All critical sections are as short as possible so hopefully this mutex spins for a few cycles without syscall
     queue: Mutex<BinaryHeap<Item<T>, Min, N>>,
+    // Futex used to notify receiver
     reader_state: Futex<Private>,
 }
 
@@ -34,17 +37,23 @@ impl<T, const N: usize> FutexQueue<T, N> {
     }
 }
 
+/// Sender half of the queue. Safe to share between threads.
 pub struct Sender<T, const N: usize> {
     inner: Arc<FutexQueue<T, N>>,
 }
 
+/// Receiver half of the queue.
 pub struct Receiver<T, const N: usize> {
     inner: Arc<FutexQueue<T, N>>,
 }
 
 impl<T, const N: usize> Sender<T, N> {
+    /// Sends an item into the queue.
+    /// The receive order of sent items is not guaranteed.
     pub fn send(&self, item: T) -> Result<(), T> {
-        match self.inner.queue.lock().unwrap().push(Item::Immediate(item)) {
+        let res = self.inner.queue.lock().unwrap().push(Item::Immediate(item));
+
+        match res {
             Ok(()) => {
                 if self
                     .inner
@@ -53,6 +62,7 @@ impl<T, const N: usize> Sender<T, N> {
                     .swap(FUTEX_NOTIFIED, atomic::Ordering::Release)
                     == FUTEX_PARKED
                 {
+                    // Wake up receiver thread because it was parked
                     self.inner.reader_state.wake(1);
                 }
 
@@ -62,21 +72,34 @@ impl<T, const N: usize> Sender<T, N> {
         }
     }
 
+    /// Puts item into a queue to be received at a specified instant.
+    /// Receive order is earliest deadline first (after all immediate items).
     pub fn send_scheduled(&self, item: T, instant: Instant) -> Result<(), T> {
-        match self
-            .inner
-            .queue
-            .lock()
-            .unwrap()
-            .push(Item::Scheduled(item, instant))
-        {
+        // Keep critical section small
+        let (res, reload_timer) = {
+            let mut queue = self.inner.queue.lock().unwrap();
+            // Reload timer if new instant is the earliest in the queue or if there are no scheduled items.
+            // Note that this also evaluates to true if there is an immediate item at the front of the queue,
+            // but this edge case is rare and should not cause major performance issues.
+            let reload_timer = queue
+                .peek()
+                .map(|i| i.instant())
+                .flatten()
+                .map(|i| instant < i)
+                .unwrap_or(true);
+            let res = queue.push(Item::Scheduled(item, instant));
+            (res, reload_timer)
+        };
+
+        match res {
             Ok(()) => {
-                if self
-                    .inner
-                    .reader_state
-                    .value
-                    .swap(FUTEX_NOTIFIED, atomic::Ordering::Release)
-                    == FUTEX_PARKED
+                if reload_timer
+                    && self
+                        .inner
+                        .reader_state
+                        .value
+                        .swap(FUTEX_NOTIFIED, atomic::Ordering::Release)
+                        == FUTEX_PARKED
                 {
                     self.inner.reader_state.wake(1);
                 }
@@ -89,7 +112,10 @@ impl<T, const N: usize> Sender<T, N> {
 }
 
 impl<T, const N: usize> Receiver<T, N> {
-    pub fn try_recv(&self) -> Result<Item<T>, Option<Instant>> {
+    /// Tries to receive from the queue without blocking.
+    /// Immediate items are returned first, then scheduled items in the order of earliest deadline first.
+    /// Error contains an optional Instant of the earliest (not ready) deadline in the queue.
+    pub fn try_recv(&mut self) -> Result<Item<T>, Option<Instant>> {
         let mut queue = self.inner.queue.lock().unwrap();
 
         match queue.peek() {
@@ -113,6 +139,8 @@ impl<T, const N: usize> Receiver<T, N> {
         }
     }
 
+    /// Tries to receive from the queue and blocks the current thread if queue is empty.
+    /// Immediate items are returned first, then scheduled items in the order of earliest deadline first.
     pub fn recv(&mut self) -> Item<T> {
         loop {
             let next_instant = match self.try_recv() {
@@ -121,6 +149,7 @@ impl<T, const N: usize> Receiver<T, N> {
             };
 
             // Check if anything new was queued while running to prevent expensive futex syscall
+            // Change NOTIFIED=>EMPTY or EMPTY=>PARKED, and continue in the first case
             if self
                 .inner
                 .reader_state
@@ -139,25 +168,45 @@ impl<T, const N: usize> Receiver<T, N> {
             } else {
                 self.inner.reader_state.wait(FUTEX_PARKED).ok();
             }
+
+            // Reset state
+            self.inner
+                .reader_state
+                .value
+                .store(FUTEX_EMPTY, atomic::Ordering::Release);
         }
     }
 }
 
+/// Represents queued item.
 pub enum Item<T> {
+    /// Item queued to be received immediately.
     Immediate(T),
+    /// Item queued to be received at a specified instant.
     Scheduled(T, Instant),
 }
 
 impl<T> Item<T> {
+    /// Returns reference to the item value.
     pub fn value(&self) -> &T {
         match self {
             Item::Immediate(i) | Item::Scheduled(i, _) => i,
         }
     }
 
+    /// Consumes item to unwrap the contained value.
     pub fn into_value(self) -> T {
         match self {
             Item::Immediate(i) | Item::Scheduled(i, _) => i,
+        }
+    }
+
+    /// Returns the scheduled instant of the item.
+    /// Returns None if the item was immediate.
+    pub fn instant(&self) -> Option<Instant> {
+        match self {
+            Item::Immediate(_) => None,
+            Item::Scheduled(_, instant) => Some(*instant),
         }
     }
 }

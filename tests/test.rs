@@ -4,7 +4,7 @@ use futex_queue::FutexQueue;
 
 #[test]
 fn simple_send_recv() {
-    let (tx, rx) = FutexQueue::<u32, 4>::new();
+    let (tx, mut rx) = FutexQueue::<u32, 4>::new();
 
     tx.send(1).unwrap();
     tx.send(2).unwrap();
@@ -19,7 +19,7 @@ fn simple_send_recv() {
 
 #[test]
 fn sorting() {
-    let (tx, rx) = FutexQueue::<u32, 4>::new();
+    let (tx, mut rx) = FutexQueue::<u32, 4>::new();
 
     let later = Instant::now() + Duration::from_secs(100);
     let more_later = Instant::now() + Duration::from_secs(150);
